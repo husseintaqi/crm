@@ -1,173 +1,98 @@
 #!/bin/bash
 
 # Setup SSL and Nginx Reverse Proxy for Twenty CRM
-# This will make the CRM accessible at https://edu.automatespot.com
-
 DOMAIN="edu.automatespot.com"
 EMAIL="admin@$DOMAIN"
-APP_PORT="8080"
 
 echo "========================================="
 echo "   SSL & Nginx Setup for Twenty CRM"
 echo "========================================="
 echo ""
-echo "Domain: $DOMAIN"
-echo "Email: $EMAIL"
-echo ""
 
-# Check if nginx is installed
-if ! command -v nginx &> /dev/null; then
-    echo "Installing Nginx..."
-    apt-get update
-    apt-get install -y nginx
-else
-    echo "✓ Nginx already installed"
-fi
+# Install packages
+apt-get update
+apt-get install -y nginx certbot python3-certbot-nginx
 
-# Stop nginx temporarily
+# Stop nginx and any service using port 80
 systemctl stop nginx
+fuser -k 80/tcp 2>/dev/null || true
 
-# Install Certbot if not present
-if ! command -v certbot &> /dev/null; then
-    echo "Installing Certbot..."
-    apt-get install -y certbot python3-certbot-nginx
-else
-    echo "✓ Certbot already installed"
+# Get SSL certificate using standalone mode
+echo "Obtaining SSL certificate..."
+certbot certonly --standalone -d $DOMAIN \
+    --non-interactive \
+    --agree-tos \
+    --email $EMAIL
+
+if [ $? -ne 0 ]; then
+    echo "❌ Failed to obtain SSL certificate"
+    echo "Make sure DNS points to this server and port 80 is accessible"
+    exit 1
 fi
 
-# Create temporary HTTP-only Nginx configuration (for certificate verification)
-echo "Creating initial HTTP Nginx configuration..."
-cat > /etc/nginx/sites-available/twenty-crm << 'NGINXCONF'
+# Now create Nginx config with SSL
+echo "Creating Nginx configuration with SSL..."
+cat > /etc/nginx/sites-available/twenty-crm << 'EOF'
 server {
     listen 80;
     listen [::]:80;
     server_name edu.automatespot.com;
+    return 301 https://$server_name$request_uri;
+}
 
-    # Increase client body size for file uploads
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name edu.automatespot.com;
+
+    ssl_certificate /etc/letsencrypt/live/edu.automatespot.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/edu.automatespot.com/privkey.pem;
+    
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    
     client_max_body_size 100M;
 
-    # Proxy settings
     location / {
         proxy_pass http://localhost:8080;
         proxy_http_version 1.1;
-        
-        # WebSocket support
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
-        
-        # Headers
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host $host;
-        proxy_set_header X-Forwarded-Port $server_port;
-        
-        # Timeouts
         proxy_connect_timeout 60s;
         proxy_send_timeout 60s;
         proxy_read_timeout 60s;
     }
-
-    # Health check endpoint
-    location /healthz {
-        proxy_pass http://localhost:8080/healthz;
-        access_log off;
-    }
 }
-NGINXCONF
+EOF
 
-# Enable the site
+# Enable site
 ln -sf /etc/nginx/sites-available/twenty-crm /etc/nginx/sites-enabled/twenty-crm
-
-# Remove default nginx site if it exists
 rm -f /etc/nginx/sites-enabled/default
 
-# Test nginx configuration
-echo "Testing Nginx configuration..."
-nginx -t
+# Test and start Nginx
+nginx -t && systemctl start nginx && systemctl enable nginx
 
-if [ $? -ne 0 ]; then
-    echo "❌ Nginx configuration test failed!"
-    exit 1
-fi
+# Setup auto-renewal
+systemctl enable certbot.timer && systemctl start certbot.timer
 
-# Start Nginx
-echo "Starting Nginx..."
-systemctl start nginx
-systemctl enable nginx
+# Update Twenty CRM config
+cd /opt/twenty-crm
+sed -i "s|SERVER_URL=.*|SERVER_URL=https://$DOMAIN|g" .env
+sed -i "s|FRONT_BASE_URL=.*|FRONT_BASE_URL=https://$DOMAIN|g" .env
+docker-compose -f docker-compose-custom.yml restart server worker
 
-# Wait a moment for Nginx to start
-sleep 3
-
-# Obtain SSL certificate
 echo ""
-echo "Obtaining SSL certificate from Let's Encrypt..."
-echo "This may take a minute..."
+echo "========================================="
+echo "         Setup Complete! ✓"
+echo "========================================="
+echo ""
+echo "Your CRM is now accessible at:"
+echo "  https://$DOMAIN"
 echo ""
 
-certbot --nginx -d $DOMAIN \
-    --non-interactive \
-    --agree-tos \
-    --email $EMAIL \
-    --redirect
-
-if [ $? -eq 0 ]; then
-    echo ""
-    echo "✓ SSL certificate obtained successfully!"
-    
-    # Setup automatic renewal
-    systemctl enable certbot.timer
-    systemctl start certbot.timer
-    
-    # Update Twenty CRM environment to use HTTPS
-    echo ""
-    echo "Updating Twenty CRM configuration for HTTPS..."
-    cd /opt/twenty-crm
-    sed -i "s|SERVER_URL=.*|SERVER_URL=https://$DOMAIN|g" .env
-    sed -i "s|FRONT_BASE_URL=.*|FRONT_BASE_URL=https://$DOMAIN|g" .env
-    
-    # Restart Twenty CRM to apply changes
-    echo "Restarting Twenty CRM..."
-    docker-compose -f docker-compose-custom.yml restart server worker
-    
-    echo ""
-    echo "========================================="
-    echo "     SSL Setup Complete! 🎉"
-    echo "========================================="
-    echo ""
-    echo "✓ Nginx is running and configured"
-    echo "✓ SSL certificate installed"
-    echo "✓ Auto-renewal enabled"
-    echo "✓ HTTP → HTTPS redirect enabled"
-    echo ""
-    echo "🌐 Your CRM is now accessible at:"
-    echo "   https://$DOMAIN"
-    echo ""
-    echo "📋 SSL Certificate Info:"
-    certbot certificates
-    echo ""
-    echo "💡 Useful commands:"
-    echo "   Check Nginx status:        systemctl status nginx"
-    echo "   Reload Nginx:              systemctl reload nginx"
-    echo "   Test SSL renewal:          certbot renew --dry-run"
-    echo "   View SSL certificates:     certbot certificates"
-    echo "   Nginx access log:          tail -f /var/log/nginx/access.log"
-    echo "   Nginx error log:           tail -f /var/log/nginx/error.log"
-    echo ""
-else
-    echo ""
-    echo "❌ Failed to obtain SSL certificate"
-    echo ""
-    echo "This might be because:"
-    echo "  1. DNS is not properly configured (check that $DOMAIN points to this server)"
-    echo "  2. Port 80 is blocked by firewall"
-    echo "  3. The domain is already in use by another certificate"
-    echo ""
-    echo "You can still access your CRM via HTTP at:"
-    echo "   http://$DOMAIN"
-    echo ""
-    echo "To retry SSL setup later, run:"
-    echo "   certbot --nginx -d $DOMAIN"
-    echo ""
-fi
