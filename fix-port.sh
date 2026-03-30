@@ -3,36 +3,53 @@
 # Fix port conflict - switch to port 8080
 cd /opt/twenty-crm
 
-echo "Fixing port conflict - switching to port 8080..."
+echo "Fixing port conflict..."
 
-# Stop any existing containers
+# First, check what's using port 3000
+echo "Checking port 3000..."
+sudo ss -tlnp | grep :3000 || echo "No process found on port 3000"
+
+# Stop any existing Twenty containers
+echo "Stopping existing containers..."
 docker-compose -f packages/twenty-docker/docker-compose.yml down 2>/dev/null || true
 
-# Update environment file to use port 8080
-sed -i 's/:3000/:8080/g' .env
+# Kill any process using port 3000
+echo "Freeing port 3000..."
+sudo fuser -k 3000/tcp 2>/dev/null || echo "Port 3000 was not in use by other processes"
 
-# Create custom docker-compose override
-cat > docker-compose.override.yml << 'EOF'
-version: '3.8'
+# Update environment file
+echo "Updating environment..."
+sed -i 's/:8080/:3000/g' .env
+sed -i 's/SERVER_URL=.*/SERVER_URL=http:\/\/edu.automatespot.com:3000/' .env
 
-services:
-  server:
-    ports:
-      - "8080:3000"  # Map host port 8080 to container port 3000
-EOF
-
-# Start services with override
-echo "Starting services on port 8080..."
-docker-compose -f packages/twenty-docker/docker-compose.yml -f docker-compose.override.yml up -d
+# Start services again
+echo "Starting services..."
+docker-compose -f packages/twenty-docker/docker-compose.yml up -d
 
 # Wait for services
-sleep 15
+sleep 20
 
 echo ""
 echo "Service Status:"
 docker-compose -f packages/twenty-docker/docker-compose.yml ps
 
 echo ""
-echo "Deployment fixed!"
-echo "Your CRM is now available at: http://edu.automatespot.com:8080"
-echo "Or directly at: http://46.62.138.89:8080"
+echo "Recent logs:"
+docker-compose -f packages/twenty-docker/docker-compose.yml logs --tail=30
+
+echo ""
+echo "=================================="
+echo "Deployment Complete!"
+echo "=================================="
+echo "Your CRM is available at:"
+echo "  - http://edu.automatespot.com:3000"
+echo "  - http://46.62.138.89:3000"
+echo ""
+echo "Database Credentials (from .env file):"
+cat /opt/twenty-crm/.env | grep -E "DATABASE_PASSWORD|APP_SECRET"
+echo ""
+echo "Useful commands:"
+echo "  View logs:    cd /opt/twenty-crm && docker-compose -f packages/twenty-docker/docker-compose.yml logs -f"
+echo "  Restart:      cd /opt/twenty-crm && docker-compose -f packages/twenty-docker/docker-compose.yml restart"
+echo "  Stop:         cd /opt/twenty-crm && docker-compose -f packages/twenty-docker/docker-compose.yml down"
+
